@@ -3,9 +3,9 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { pipeline } from "stream/promises";
-import ytdl from "ytdl-core";
+import ytdl from "@distube/ytdl-core";
 
-/* ---------------- CORS ---------------- */
+/* ------------- CORS ------------- */
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -13,7 +13,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Expose-Headers", "X-Transcript-Source, Content-Disposition");
 }
 
-/* ---------------- Helpers ---------------- */
+/* ------------- Helpers ------------- */
 function extractVideoId(u) {
   const m =
     u?.match(/[?&]v=([^&]+)/) ||
@@ -32,15 +32,36 @@ function normalizeYouTubeUrl(input) {
   return input;
 }
 function guessExt(fmt) {
-  const byContainer = fmt?.container && String(fmt.container).toLowerCase();
-  if (byContainer) return byContainer;
-  const mt = fmt?.mimeType || "";
-  // e.g. "audio/webm; codecs=\"opus\"" or "audio/mp4; codecs=\"mp4a.40.2\""
-  if (/audio\/webm/i.test(mt) || /opus/i.test(mt)) return "webm";
-  if (/audio\/mp4/i.test(mt) || /m4a/i.test(mt) || /aac/i.test(mt)) return "m4a";
-  if (/audio\/mpeg/i.test(mt)) return "mp3";
-  if (/audio\/ogg/i.test(mt)) return "ogg";
+  const c = (fmt?.container || "").toLowerCase();
+  if (c) return c;
+  const mt = (fmt?.mimeType || "").toLowerCase();
+  if (mt.includes("webm") || mt.includes("opus")) return "webm";
+  if (mt.includes("mp4") || mt.includes("m4a") || mt.includes("aac")) return "m4a";
+  if (mt.includes("mpeg")) return "mp3";
+  if (mt.includes("ogg")) return "ogg";
   return "webm";
+}
+
+/* Try getInfo with different YouTube clients to avoid 410 */
+async function getInfoRobust(url, headers, debug) {
+  // Preferred order: ANDROID → WEB
+  const clients = ["ANDROID", "WEB"];
+  let lastErr;
+
+  for (const client of clients) {
+    try {
+      // @distube/ytdl-core exposes setDefaultClient at runtime (safe to call)
+      ytdl.setDefaultClient?.(client);
+      const info = await ytdl.getInfo(url, { requestOptions: { headers } });
+      if (debug) console.log(`[ytdl] getInfo ok via ${client}`);
+      return info;
+    } catch (e) {
+      lastErr = e;
+      if (debug) console.error(`[ytdl] getInfo failed via ${client}:`, e?.message || e);
+      // try next client
+    }
+  }
+  throw lastErr || new Error("getInfo failed");
 }
 
 /* ------------- Handler ------------- */
@@ -65,37 +86,36 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "OPENAI_API_KEY is missing in project env" });
     }
 
-    // Validate URL with ytdl-core first
+    // ytdl-core validation
     if (!ytdl.validateURL(normalizedUrl)) {
       return res.status(400).json({ error: "Invalid or unsupported YouTube URL" });
     }
 
-    // Prepare headers to look like a real browser (helps with some regions)
+    // Realistic headers help in serverless regions
     const headers = {
       "user-agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-      "accept-language": "en-US,en;q=0.9"
+      "accept-language": "en-US,en;q=0.9",
+      "referer": "https://www.youtube.com/"
     };
 
-    // Fetch info & choose best audio-only format
+    // 1) Robust info fetch (ANDROID → WEB)
     let info;
     try {
-      info = await ytdl.getInfo(normalizedUrl, { requestOptions: { headers } });
+      info = await getInfoRobust(normalizedUrl, headers, debug);
     } catch (e) {
       const msg = e?.message || String(e);
-      console.error("[ytdl] getInfo failed:", msg);
+      console.error("[ytdl] getInfo failed (all clients):", msg);
       return res.status(502).json({ error: `ytdl getInfo failed: ${msg}`, ...(debug ? { stack: e?.stack } : {}) });
     }
 
-    const formatChosen = ytdl.chooseFormat(info.formats, {
-      quality: "highestaudio",
-      filter: "audioonly"
-    });
+    // 2) Choose best audio
+    const formatChosen = ytdl.chooseFormat(info.formats, { quality: "highestaudio", filter: "audioonly" });
     if (!formatChosen || (!formatChosen.url && !formatChosen.signatureCipher)) {
       return res.status(502).json({ error: "No suitable audio format found from YouTube." });
     }
 
-    // Create temp file in /tmp and stream audio into it
+    // 3) Save audio to /tmp
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yta-"));
     const ext = guessExt(formatChosen);
     const filePath = path.join(tmpDir, `audio.${ext}`);
@@ -104,7 +124,7 @@ export default async function handler(req, res) {
       const readStream = ytdl.downloadFromInfo(info, {
         format: formatChosen,
         requestOptions: { headers },
-        highWaterMark: 1 << 25 // 32MB buffer to reduce chunking overhead
+        highWaterMark: 1 << 25 // 32MB
       });
       await pipeline(readStream, fs.createWriteStream(filePath));
     } catch (e) {
@@ -114,7 +134,7 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: `Audio download failed: ${msg}`, ...(debug ? { stack: e?.stack } : {}) });
     }
 
-    // OpenAI Whisper
+    // 4) Whisper
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const responseFormat = format === "srt" ? "srt" : "text";
     let tr;
@@ -132,31 +152,19 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: msg, ...(debug ? { stack: e?.stack } : {}) });
     }
 
-    // Cleanup & respond
+    // 5) Cleanup & respond
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-
     res.setHeader("X-Transcript-Source", "openai");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${videoId}.${responseFormat === "srt" ? "srt" : "txt"}"`
-    );
-
+    res.setHeader("Content-Disposition", `attachment; filename="${videoId}.${responseFormat === "srt" ? "srt" : "txt"}"`);
     if (wrap === "json") {
-      return res.json({
-        source: "openai",
-        videoId,
-        format: responseFormat === "srt" ? "srt" : "txt",
-        text: tr
-      });
+      return res.json({ source: "openai", videoId, format: responseFormat === "srt" ? "srt" : "txt", text: tr });
     }
     return res.type("text/plain").send(tr);
 
   } catch (e) {
     console.error("[handler] error", e?.message || e);
     const payload = { error: e?.message || "Transcription failed" };
-    if (String(req.query?.debug || "").toLowerCase() === "1") {
-      payload.stack = e?.stack;
-    }
+    if (debug) payload.stack = e?.stack;
     return res.status(500).json(payload);
   }
 }
