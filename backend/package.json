@@ -1,15 +1,10 @@
 {
-    "name": "yt-transcriber-backend",
-    "version": "1.0.0",
-    "type": "module",
-    "private": true,
-    "scripts": {
-      "dev": "vercel dev",
-      "start": "node api/transcript.js"
-    },
-    "dependencies": {
-      "openai": "^4.0.0",
-      "yt-dlp-wrap": "^2.3.12"
-    }
+  "name": "yt-transcriber-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "openai": "^4.0.0",
+    "ytdl-core": "^4.11.5"
   }
-  
+}
