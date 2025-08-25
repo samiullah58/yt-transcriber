@@ -1,0 +1,19 @@
+# Node
+node_modules
+npm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+
+# Build
+dist
+.vercel
+
+# Env files
+.env
+**/.env
+**/.env.local
+
+# Backend temp/binaries
+backend/bin/yt-dlp
+backend/bin/yt-dlp.exe
+backend/**/tmp
