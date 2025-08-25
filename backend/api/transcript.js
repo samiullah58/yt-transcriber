@@ -3,10 +3,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { pipeline } from "stream/promises";
-import ytdlpWrapPkg from "yt-dlp-wrap";
 
-const YTDlpWrap = ytdlpWrapPkg?.default || ytdlpWrapPkg;
-
+/* ---------- CORS ---------- */
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -14,6 +12,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Expose-Headers", "X-Transcript-Source, Content-Disposition");
 }
 
+/* ---------- URL helpers ---------- */
 function extractVideoId(u) {
   const m =
     u?.match(/[?&]v=([^&]+)/) ||
@@ -32,49 +31,61 @@ function normalizeYouTubeUrl(input) {
   return input;
 }
 
-/** Choose the correct compiled asset for the current platform/arch */
-function getYtDlpAssetInfo() {
-  const p = process.platform;
-  const a = process.arch;
+/* ---------- Piped API ---------- */
+/** Configure which Piped backend to use. You can change this in Vercel env later */
+const PIPED_API_BASE =
+  (process.env.PIPED_API_BASE && process.env.PIPED_API_BASE.replace(/\/+$/,"")) ||
+  "https://pipedapi.kavin.rocks"; // official backend base
 
-  if (p === "win32") {
-    return { name: "yt-dlp.exe", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" };
-  }
-  if (p === "darwin") {
-    // Compiled macOS build
-    return { name: "yt-dlp_macos", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" };
-  }
-  // Linux
-  if (a === "x64") {
-    return { name: "yt-dlp_linux", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux" };
-  }
-  if (a === "arm64") {
-    return { name: "yt-dlp_linux_aarch64", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64" };
-  }
-  if (a === "arm") {
-    return { name: "yt-dlp_linux_armv7l", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_armv7l" };
-  }
-  // Fallback to generic (may require python; better to fail loudly than fetch wrong)
-  return { name: "yt-dlp_linux", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux" };
-}
-
-/** Download the compiled yt-dlp binary to /tmp if missing (no python required) */
-async function ensureStandaloneYtDlp() {
-  const { name, url } = getYtDlpAssetInfo();
-  const binPath = path.join(os.tmpdir(), name);
-
-  if (!fs.existsSync(binPath)) {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`Failed to download yt-dlp binary (${resp.status}) from ${url}`);
-    const file = fs.createWriteStream(binPath);
-    await pipeline(resp.body, file);
-    if (process.platform !== "win32") {
-      fs.chmodSync(binPath, 0o755);
+async function getPipedStreams(videoId) {
+  const url = `${PIPED_API_BASE}/api/v1/streams/${videoId}`;
+  const r = await fetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      "accept": "application/json"
     }
+  });
+  if (!r.ok) {
+    throw new Error(`Piped streams fetch failed (${r.status})`);
   }
-  return binPath;
+  return r.json();
 }
 
+/* ---------- Choose best audio + extension ---------- */
+function pickAudioAndExt(streamsJson) {
+  const list = streamsJson?.audioStreams || streamsJson?.audio || [];
+  if (!Array.isArray(list) || !list.length) return null;
+
+  // Sort by bitrate (desc) if available
+  const sorted = list
+    .map(s => {
+      // Try to parse numeric bitrate (some instances give string like "128 kbps")
+      let br = 0;
+      if (typeof s.bitrate === "number") br = s.bitrate;
+      else if (typeof s.bitrate === "string") {
+        const m = s.bitrate.match(/(\d+)/);
+        if (m) br = parseInt(m[1], 10);
+      }
+      return { ...s, __br: br };
+    })
+    .sort((a,b) => (b.__br - a.__br));
+
+  const chosen = sorted[0];
+
+  // Guess extension from mimeType/container
+  const mime = (chosen.mimeType || chosen.type || "").toLowerCase();
+  const codec = (chosen.codec || "").toLowerCase();
+  const container = (chosen.container || "").toLowerCase();
+
+  let ext = "webm";
+  if (mime.includes("mp4") || mime.includes("m4a") || container.includes("mp4") || codec.includes("aac")) ext = "m4a";
+  else if (mime.includes("mp3")) ext = "mp3";
+  else if (mime.includes("ogg") || mime.includes("opus")) ext = "webm"; // OpenAI supports webm/ogg
+
+  return { url: chosen.url, ext };
+}
+
+/* ---------- Handler ---------- */
 export default async function handler(req, res) {
   if (req.method === "OPTIONS") {
     setCors(res);
@@ -94,71 +105,51 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "OPENAI_API_KEY is missing in project env" });
     }
 
-    // Ensure **compiled** yt-dlp (no python3)
-    const BIN_PATH = await ensureStandaloneYtDlp();
-    const ytDlp = new YTDlpWrap(BIN_PATH);
+    // 1) Get stream info from Piped (no binaries needed)
+    const streamsJson = await getPipedStreams(videoId);
 
-    // Temp dir in /tmp (the only writable path on Vercel)
+    // 2) Pick best audio + file extension
+    const chosen = pickAudioAndExt(streamsJson);
+    if (!chosen?.url) {
+      return res.status(502).json({ error: "No audio streams available from Piped for this video." });
+    }
+
+    // 3) Download audio to /tmp
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yta-"));
-    const outTemplate = path.join(tmpDir, "audio.%(ext)s");
-
-    // Download best audio; let yt-dlp choose real extension
-    try {
-      await ytDlp.execPromise([
-        "-f", "bestaudio/best",
-        "--no-warnings",
-        "--no-check-certificate",
-        "-o", outTemplate,
-        normalizedUrl,
-      ]);
-    } catch (e) {
+    const filePath = path.join(tmpDir, `audio.${chosen.ext}`);
+    const resp = await fetch(chosen.url, {
+      headers: {
+        // some instances require a UA
+        "user-agent": "Mozilla/5.0",
+        "accept": "*/*"
+      }
+    });
+    if (!resp.ok || !resp.body) {
       try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      return res.status(500).json({ error: `yt-dlp failed: ${e?.message || e}` });
+      return res.status(502).json({ error: `Failed to download audio (${resp.status})` });
     }
+    await pipeline(resp.body, fs.createWriteStream(filePath));
 
-    // Pick supported audio output
-    const allowed = new Set(["flac","m4a","mp3","mp4","mpeg","mpga","oga","ogg","wav","webm"]);
-    const files = fs.readdirSync(tmpDir)
-      .map(f => path.join(tmpDir, f))
-      .filter(f => allowed.has(path.extname(f).slice(1).toLowerCase()) && fs.statSync(f).isFile());
-
-    if (!files.length) {
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      return res.status(500).json({ error: "Download produced no supported audio file." });
-    }
-
-    // Choose the largest file (usually the best-quality audio)
-    const filePath = files
-      .map(f => ({ f, s: fs.statSync(f).size }))
-      .sort((a, b) => b.s - a.s)[0].f;
-
-    // OpenAI Whisper
+    // 4) Transcribe with OpenAI Whisper
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const responseFormat = format === "srt" ? "srt" : "text";
-
-    const transcription = await openai.audio.transcriptions.create({
+    const tr = await openai.audio.transcriptions.create({
       file: fs.createReadStream(filePath),
       model: "whisper-1",
       response_format: responseFormat,
-      language: lang || undefined, // let Whisper auto-detect if not provided
+      language: lang || undefined
     });
 
-    // Cleanup temp
+    // 5) Clean up & respond
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 
-    // Respond
     res.setHeader("X-Transcript-Source", "openai");
     res.setHeader("Content-Disposition", `attachment; filename="${videoId}.${responseFormat === "srt" ? "srt" : "txt"}"`);
 
     if (wrap === "json") {
-      return res.json({
-        source: "openai",
-        videoId,
-        format: responseFormat === "srt" ? "srt" : "txt",
-        text: transcription
-      });
+      return res.json({ source: "openai", videoId, format: responseFormat === "srt" ? "srt" : "txt", text: tr });
     }
-    res.type("text/plain").send(transcription);
+    return res.type("text/plain").send(tr);
 
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Transcription failed" });
