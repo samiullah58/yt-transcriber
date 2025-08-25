@@ -32,28 +32,46 @@ function normalizeYouTubeUrl(input) {
   return input;
 }
 
-// Download the **standalone** yt-dlp binary to /tmp if missing.
-// IMPORTANT: These URLs point to compiled binaries that DON'T require python3.
+/** Choose the correct compiled asset for the current platform/arch */
+function getYtDlpAssetInfo() {
+  const p = process.platform;
+  const a = process.arch;
+
+  if (p === "win32") {
+    return { name: "yt-dlp.exe", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" };
+  }
+  if (p === "darwin") {
+    // Compiled macOS build
+    return { name: "yt-dlp_macos", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" };
+  }
+  // Linux
+  if (a === "x64") {
+    return { name: "yt-dlp_linux", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux" };
+  }
+  if (a === "arm64") {
+    return { name: "yt-dlp_linux_aarch64", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64" };
+  }
+  if (a === "arm") {
+    return { name: "yt-dlp_linux_armv7l", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_armv7l" };
+  }
+  // Fallback to generic (may require python; better to fail loudly than fetch wrong)
+  return { name: "yt-dlp_linux", url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux" };
+}
+
+/** Download the compiled yt-dlp binary to /tmp if missing (no python required) */
 async function ensureStandaloneYtDlp() {
-  const binPath = path.join(os.tmpdir(), process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+  const { name, url } = getYtDlpAssetInfo();
+  const binPath = path.join(os.tmpdir(), name);
 
   if (!fs.existsSync(binPath)) {
-    const url =
-      process.platform === "win32"
-        ? "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-        : "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
-
     const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`Failed to download yt-dlp binary (${resp.status})`);
-
+    if (!resp.ok) throw new Error(`Failed to download yt-dlp binary (${resp.status}) from ${url}`);
     const file = fs.createWriteStream(binPath);
     await pipeline(resp.body, file);
-
     if (process.platform !== "win32") {
       fs.chmodSync(binPath, 0o755);
     }
   }
-
   return binPath;
 }
 
@@ -76,7 +94,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "OPENAI_API_KEY is missing in project env" });
     }
 
-    // Ensure compiled yt-dlp binary (no python3)
+    // Ensure **compiled** yt-dlp (no python3)
     const BIN_PATH = await ensureStandaloneYtDlp();
     const ytDlp = new YTDlpWrap(BIN_PATH);
 
