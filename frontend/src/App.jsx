@@ -22,7 +22,12 @@ export default function App() {
     setLoading(true);
     try {
       const resp = await fetch(
-        `${API_BASE}/transcript?url=${encodeURIComponent(url)}&format=${format}`
+        `${API_BASE}/transcript?url=${encodeURIComponent(url)}&format=${format}`,
+        {
+          headers: {
+            "ngrok-skip-browser-warning": "true",
+          },
+        }
       );
       if (!resp.ok) {
         const j = await resp.json().catch(() => ({}));
