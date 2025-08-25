@@ -42,23 +42,24 @@ function guessExt(fmt) {
   return "webm";
 }
 
-/* Try getInfo with different YouTube clients to avoid 410 */
-async function getInfoRobust(url, headers, debug) {
-  // Preferred order: ANDROID → WEB
-  const clients = ["ANDROID", "WEB"];
-  let lastErr;
+/* Try getInfo with different YouTube clients + cookies to avoid 410/bot checks */
+async function getInfoRobust(url, baseHeaders, debug) {
+  const clientsCsv = process.env.YTDL_CLIENTS || "ANDROID,WEB";
+  const clients = clientsCsv.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
 
+  let lastErr;
   for (const client of clients) {
     try {
-      // @distube/ytdl-core exposes setDefaultClient at runtime (safe to call)
-      ytdl.setDefaultClient?.(client);
-      const info = await ytdl.getInfo(url, { requestOptions: { headers } });
+      if (typeof ytdl.setDefaultClient === "function") {
+        ytdl.setDefaultClient(client);
+      }
+      const info = await ytdl.getInfo(url, { requestOptions: { headers: baseHeaders } });
       if (debug) console.log(`[ytdl] getInfo ok via ${client}`);
       return info;
     } catch (e) {
       lastErr = e;
       if (debug) console.error(`[ytdl] getInfo failed via ${client}:`, e?.message || e);
-      // try next client
+      // try next
     }
   }
   throw lastErr || new Error("getInfo failed");
@@ -82,31 +83,39 @@ export default async function handler(req, res) {
     const videoId = extractVideoId(normalizedUrl);
     if (!videoId) return res.status(400).json({ error: "Invalid YouTube URL" });
 
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(400).json({ error: "OPENAI_API_KEY is missing in project env" });
-    }
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return res.status(400).json({ error: "OPENAI_API_KEY is missing in project env" });
 
     // ytdl-core validation
     if (!ytdl.validateURL(normalizedUrl)) {
       return res.status(400).json({ error: "Invalid or unsupported YouTube URL" });
     }
 
-    // Realistic headers help in serverless regions
+    // Build headers: UA + cookies (+ identity token)
+    const cookieHeader = process.env.YTDL_COOKIE || "";       // paste full cookie header string
+    const idToken = process.env.YTDL_ID_TOKEN || "";          // optional
+    const userAgent = process.env.YTDL_UA || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36";
+
     const headers = {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+      "user-agent": userAgent,
       "accept-language": "en-US,en;q=0.9",
-      "referer": "https://www.youtube.com/"
+      "referer": `https://www.youtube.com/watch?v=${videoId}`,
+      "origin": "https://www.youtube.com",
+      ...(cookieHeader ? { "cookie": cookieHeader } : {}),
+      ...(idToken ? { "x-youtube-identity-token": idToken } : {})
     };
 
-    // 1) Robust info fetch (ANDROID → WEB)
+    // 1) getInfo with ANDROID → WEB, using cookies if provided
     let info;
     try {
       info = await getInfoRobust(normalizedUrl, headers, debug);
     } catch (e) {
       const msg = e?.message || String(e);
       console.error("[ytdl] getInfo failed (all clients):", msg);
-      return res.status(502).json({ error: `ytdl getInfo failed: ${msg}`, ...(debug ? { stack: e?.stack } : {}) });
+      const hint = cookieHeader
+        ? "Your cookies may be stale or missing required keys (CONSENT, VISITOR_INFO1_LIVE, PREF, YSC). Refresh cookies and redeploy."
+        : "Provide YTDL_COOKIE env with your youtube.com cookies to bypass bot checks.";
+      return res.status(502).json({ error: `ytdl getInfo failed: ${msg}`, hint, ...(debug ? { stack: e?.stack } : {}) });
     }
 
     // 2) Choose best audio
@@ -135,7 +144,7 @@ export default async function handler(req, res) {
     }
 
     // 4) Whisper
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const openai = new OpenAI({ apiKey });
     const responseFormat = format === "srt" ? "srt" : "text";
     let tr;
     try {
@@ -156,6 +165,7 @@ export default async function handler(req, res) {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     res.setHeader("X-Transcript-Source", "openai");
     res.setHeader("Content-Disposition", `attachment; filename="${videoId}.${responseFormat === "srt" ? "srt" : "txt"}"`);
+
     if (wrap === "json") {
       return res.json({ source: "openai", videoId, format: responseFormat === "srt" ? "srt" : "txt", text: tr });
     }
