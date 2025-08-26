@@ -1,8 +1,6 @@
 // api/transcript.js
 // YouTube Transcript Service for Vercel
 
-import ytdl from '@distube/ytdl-core';
-
 // CORS headers
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -16,116 +14,101 @@ async function downloadRealYouTubeAudio(videoId) {
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
   
   try {
-    // Method 1: Try with custom headers first
-    console.log(`🔄 Method 1: Trying with custom headers...`);
-    const videoInfo = await ytdl.getInfo(videoUrl, {
-      requestOptions: {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
-          'Accept-Encoding': 'gzip, deflate',
-          'DNT': '1',
-          'Connection': 'keep-alive',
-          'Upgrade-Insecure-Requests': '1',
-        }
+    // Method 1: Try direct audio stream approach
+    console.log(`🔄 Method 1: Trying direct audio stream...`);
+    
+    // First, get the video page to extract audio URL
+    const pageResponse = await fetch(videoUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
       }
     });
-    console.log(`✅ Video: ${videoInfo.videoDetails.title}`);
     
-    // Get audio-only format
-    const audioFormats = ytdl.filterFormats(videoInfo.formats, 'audioonly');
+    if (!pageResponse.ok) {
+      throw new Error(`Failed to fetch video page: ${pageResponse.status}`);
+    }
+    
+    const pageHtml = await pageResponse.text();
+    
+    // Extract ytInitialPlayerResponse from the page
+    const ytInitialPlayerResponseMatch = pageHtml.match(/var ytInitialPlayerResponse = ({.+?});/);
+    if (!ytInitialPlayerResponseMatch) {
+      throw new Error('Could not find ytInitialPlayerResponse in page');
+    }
+    
+    const ytInitialPlayerResponse = JSON.parse(ytInitialPlayerResponseMatch[1]);
+    const streamingData = ytInitialPlayerResponse.streamingData;
+    
+    if (!streamingData || !streamingData.formats) {
+      throw new Error('No streaming data found');
+    }
+    
+    // Find audio-only format
+    const audioFormats = streamingData.formats.filter(format => 
+      format.mimeType && format.mimeType.includes('audio')
+    );
     
     if (audioFormats.length === 0) {
       throw new Error('No audio formats available');
     }
     
-    // Get the best audio format
+    // Get the best audio format (highest bitrate)
     const bestAudioFormat = audioFormats.reduce((best, current) => {
-      return (current.audioBitrate || 0) > (best.audioBitrate || 0) ? current : best;
+      return (current.bitrate || 0) > (best.bitrate || 0) ? current : best;
     });
     
-    console.log(`🎵 Audio format: ${bestAudioFormat.audioBitrate || 'Unknown'} kbps`);
+    console.log(`🎵 Audio format found: ${bestAudioFormat.mimeType}`);
+    console.log(`📊 Bitrate: ${bestAudioFormat.bitrate || 'Unknown'} bps`);
     
-    // Download audio with custom headers
-    return new Promise((resolve, reject) => {
-      const audioStream = ytdl(videoUrl, {
-        format: bestAudioFormat,
-        quality: 'highestaudio',
-        requestOptions: {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-          }
-        }
-      });
-      
-      const chunks = [];
-      let totalBytes = 0;
-      
-      audioStream.on('data', (chunk) => {
-        chunks.push(chunk);
-        totalBytes += chunk.length;
-      });
-      
-      audioStream.on('end', () => {
-        console.log(`✅ Audio downloaded: ${(totalBytes / 1024 / 1024).toFixed(2)} MB`);
-        
-        // Convert to ArrayBuffer
-        const buffer = Buffer.concat(chunks);
-        const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-        
-        resolve(arrayBuffer);
-      });
-      
-      audioStream.on('error', (error) => {
-        console.log(`⚠️ Method 1 failed: ${error.message}`);
-        reject(error);
-      });
+    // Download the audio directly
+    const audioResponse = await fetch(bestAudioFormat.url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+      }
     });
+    
+    if (!audioResponse.ok) {
+      throw new Error(`Failed to download audio: ${audioResponse.status}`);
+    }
+    
+    const audioBuffer = await audioResponse.arrayBuffer();
+    console.log(`✅ Audio downloaded: ${(audioBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+    
+    return audioBuffer;
     
   } catch (error) {
     console.log(`⚠️ Method 1 failed: ${error.message}`);
     
-    // Method 2: Try with different user agent and simpler approach
+    // Method 2: Try with different approach using ytdl-core but with minimal options
     try {
-      console.log(`🔄 Method 2: Trying with alternative approach...`);
-      const videoInfo = await ytdl.getInfo(videoUrl, {
-        requestOptions: {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-          }
-        }
-      });
+      console.log(`🔄 Method 2: Trying with ytdl-core minimal approach...`);
       
-      const audioFormats = ytdl.filterFormats(videoInfo.formats, 'audioonly');
+      // Dynamic import to avoid issues
+      const ytdl = await import('@distube/ytdl-core');
+      
+      const videoInfo = await ytdl.default.getBasicInfo(videoUrl);
+      const audioFormats = ytdl.default.filterFormats(videoInfo.formats, 'audioonly');
+      
       if (audioFormats.length === 0) {
         throw new Error('No audio formats available in method 2');
       }
       
-      const bestAudioFormat = audioFormats[0]; // Use first available format
+      const bestAudioFormat = audioFormats[0];
       
       return new Promise((resolve, reject) => {
-        const audioStream = ytdl(videoUrl, {
+        const audioStream = ytdl.default(videoUrl, {
           format: bestAudioFormat,
-          requestOptions: {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': '*/*',
-              'Accept-Language': 'en-US,en;q=0.9',
-              'Accept-Encoding': 'gzip, deflate, br',
-              'Connection': 'keep-alive',
-            }
-          }
+          quality: 'lowestaudio'
         });
         
         const chunks = [];
