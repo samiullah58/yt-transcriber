@@ -6,6 +6,10 @@
       "use": "@vercel/node"
     },
     {
+      "src": "api/transcript-simple.js",
+      "use": "@vercel/node"
+    },
+    {
       "src": "index.js",
       "use": "@vercel/node"
     }
@@ -14,6 +18,10 @@
     {
       "src": "/api/transcript",
       "dest": "/api/transcript.js"
+    },
+    {
+      "src": "/api/transcript-simple",
+      "dest": "/api/transcript-simple.js"
     },
     {
       "src": "/transcript",
