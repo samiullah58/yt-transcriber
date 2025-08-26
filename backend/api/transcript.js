@@ -16,8 +16,20 @@ async function downloadRealYouTubeAudio(videoId) {
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
   
   try {
-    // Get video info
-    const videoInfo = await ytdl.getInfo(videoUrl);
+    // Get video info with custom headers to avoid bot detection
+    const videoInfo = await ytdl.getInfo(videoUrl, {
+      requestOptions: {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+          'Accept-Encoding': 'gzip, deflate',
+          'DNT': '1',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1',
+        }
+      }
+    });
     console.log(`✅ Video: ${videoInfo.videoDetails.title}`);
     
     // Get audio-only format
@@ -34,11 +46,22 @@ async function downloadRealYouTubeAudio(videoId) {
     
     console.log(`🎵 Audio format: ${bestAudioFormat.audioBitrate || 'Unknown'} kbps`);
     
-    // Download audio
+    // Download audio with custom headers
     return new Promise((resolve, reject) => {
       const audioStream = ytdl(videoUrl, {
         format: bestAudioFormat,
-        quality: 'highestaudio'
+        quality: 'highestaudio',
+        requestOptions: {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+          }
+        }
       });
       
       const chunks = [];
