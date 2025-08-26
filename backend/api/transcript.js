@@ -11,7 +11,7 @@ const corsHeaders = {
 };
 
 async function downloadRealYouTubeAudio(videoId) {
-  console.log(`📥 Downloading real YouTube audio for: ${videoId}`);
+  console.log(`📥 Downloading real YouTube audio for:: ${videoId}`);
   
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
   
