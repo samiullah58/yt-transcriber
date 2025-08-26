@@ -13,31 +13,167 @@ const corsHeaders = {
 async function getTranscriptFromYouTube(videoId, lang = 'en') {
   console.log(`📥 Fetching transcript for: ${videoId}`);
   
-  try {
-    // Try to get transcript in the specified language
-    let transcript = await YoutubeTranscript.fetchTranscript(videoId, {
-      lang: lang,
-      country: 'US'
-    });
-    
-    console.log(`✅ Found transcript in ${lang}`);
-    return transcript;
-    
-  } catch (error) {
-    console.log(`⚠️ Failed to get transcript in ${lang}: ${error.message}`);
-    
-    // Try to get transcript in any available language
+  // Method 1: Try youtube-transcript with different configurations
+  const methods = [
+    {
+      name: 'youtube-transcript with lang',
+      fn: () => YoutubeTranscript.fetchTranscript(videoId, { lang, country: 'US' })
+    },
+    {
+      name: 'youtube-transcript without lang',
+      fn: () => YoutubeTranscript.fetchTranscript(videoId)
+    },
+    {
+      name: 'youtube-transcript with different country',
+      fn: () => YoutubeTranscript.fetchTranscript(videoId, { lang, country: 'GB' })
+    }
+  ];
+  
+  for (const method of methods) {
     try {
-      console.log(`🔄 Trying to get transcript in any available language...`);
-      const transcript = await YoutubeTranscript.fetchTranscript(videoId);
-      console.log(`✅ Found transcript in available language`);
+      console.log(`🔄 Trying ${method.name}...`);
+      const transcript = await method.fn();
+      console.log(`✅ Success with ${method.name}`);
       return transcript;
-      
-    } catch (fallbackError) {
-      console.log(`❌ No transcript available in any language: ${fallbackError.message}`);
-      throw new Error(`No transcript available for this video. Error: ${fallbackError.message}`);
+    } catch (error) {
+      console.log(`⚠️ ${method.name} failed: ${error.message}`);
     }
   }
+  
+  // Method 2: Try to fetch captions directly from YouTube's API
+  try {
+    console.log(`🔄 Trying direct YouTube API method...`);
+    const transcript = await fetchCaptionsDirectly(videoId, lang);
+    console.log(`✅ Success with direct API method`);
+    return transcript;
+  } catch (error) {
+    console.log(`⚠️ Direct API method failed: ${error.message}`);
+  }
+  
+  // Method 3: Try to get available languages first
+  try {
+    console.log(`🔄 Trying to get available languages first...`);
+    const languages = await YoutubeTranscript.listTranscripts(videoId);
+    console.log(`📋 Available languages:`, languages.map(l => l.language));
+    
+    // Try each available language
+    for (const language of languages) {
+      try {
+        console.log(`🔄 Trying language: ${language.language}`);
+        const transcript = await language.fetch();
+        console.log(`✅ Success with language: ${language.language}`);
+        return transcript;
+      } catch (error) {
+        console.log(`⚠️ Language ${language.language} failed: ${error.message}`);
+      }
+    }
+  } catch (error) {
+    console.log(`⚠️ Language listing failed: ${error.message}`);
+  }
+  
+  throw new Error(`All transcript methods failed for video ${videoId}`);
+}
+
+async function fetchCaptionsDirectly(videoId, lang = 'en') {
+  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  
+  // Fetch the video page
+  const response = await fetch(videoUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Accept-Encoding': 'gzip, deflate',
+      'DNT': '1',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+    }
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Failed to fetch video page: ${response.status}`);
+  }
+  
+  const html = await response.text();
+  
+  // Extract ytInitialPlayerResponse
+  const ytInitialPlayerResponseMatch = html.match(/var ytInitialPlayerResponse = ({.+?});/);
+  if (!ytInitialPlayerResponseMatch) {
+    throw new Error('Could not find ytInitialPlayerResponse');
+  }
+  
+  const playerResponse = JSON.parse(ytInitialPlayerResponseMatch[1]);
+  const captions = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+  
+  if (!captions || captions.length === 0) {
+    throw new Error('No captions found in player response');
+  }
+  
+  console.log(`📋 Found ${captions.length} caption tracks`);
+  
+  // Find the best caption track
+  let bestCaption = captions[0];
+  for (const caption of captions) {
+    if (caption.languageCode === lang) {
+      bestCaption = caption;
+      break;
+    }
+  }
+  
+  console.log(`🎯 Using caption track: ${bestCaption.languageCode} (${bestCaption.name?.simpleText || 'Unknown'})`);
+  
+  // Fetch the caption data
+  const captionResponse = await fetch(bestCaption.baseUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    }
+  });
+  
+  if (!captionResponse.ok) {
+    throw new Error(`Failed to fetch captions: ${captionResponse.status}`);
+  }
+  
+  const captionText = await captionResponse.text();
+  
+  // Parse the caption XML
+  const transcript = parseCaptionXml(captionText);
+  
+  if (!transcript || transcript.length === 0) {
+    throw new Error('Failed to parse caption data');
+  }
+  
+  return transcript;
+}
+
+function parseCaptionXml(xmlText) {
+  const transcript = [];
+  
+  // Simple XML parsing for caption data
+  const textMatches = xmlText.match(/<text[^>]*dur="([^"]*)"[^>]*start="([^"]*)"[^>]*>([^<]*)<\/text>/g);
+  
+  if (!textMatches) {
+    throw new Error('No caption text found in XML');
+  }
+  
+  textMatches.forEach((match, index) => {
+    const durMatch = match.match(/dur="([^"]*)"/);
+    const startMatch = match.match(/start="([^"]*)"/);
+    const textMatch = match.match(/>([^<]*)</);
+    
+    if (durMatch && startMatch && textMatch) {
+      const start = parseFloat(startMatch[1]) * 1000; // Convert to milliseconds
+      const duration = parseFloat(durMatch[1]) * 1000;
+      const text = textMatch[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+      
+      transcript.push({
+        text: text,
+        offset: start,
+        duration: duration
+      });
+    }
+  });
+  
+  return transcript;
 }
 
 function formatTranscriptAsText(transcript) {
@@ -155,7 +291,7 @@ export default async function handler(req, res) {
       success: false,
       error: error.message,
       message: 'Transcript extraction failed',
-      hint: 'This video may not have captions available or they may be disabled.'
+      hint: 'This video may not have captions available or they may be disabled. Try using the audio transcription endpoint instead.'
     });
   }
 }
