@@ -2,6 +2,10 @@
 // YouTube Transcript Service for Vercel
 
 import ytdl from '@distube/ytdl-core';
+// api/transcript.js
+// YouTube Transcript Service for Vercel
+
+import ytdl from '@distube/ytdl-core';
 
 // CORS headers
 const corsHeaders = {
@@ -140,6 +144,88 @@ async function extractRealTranscriptWithWhisper(videoId, title, description) {
     if (!whisperData.text || whisperData.text.length < 50) {
       throw new Error(`Whisper returned insufficient content (${whisperData.text?.length || 0} chars)`);
     }
+    
+    console.log(`🎉 SUCCESS: Real transcript extracted!`);
+    console.log(`📝 Sample: ${whisperData.text.substring(0, 200)}...`);
+    
+    return {
+      transcript: whisperData.text,
+      language: whisperData.language || 'en',
+      confidence: 0.95,
+      source: 'openai_whisper_real',
+      audio_size_bytes: audioBuffer.byteLength
+    };
+    
+  } catch (error) {
+    console.error(`❌ REAL TRANSCRIPT EXTRACTION FAILED:`, error.message);
+    throw error; // No fallback - fail completely
+  }
+}
+
+// Main API handler
+export default async function handler(req, res) {
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.status(200).end();
+    return;
+  }
+
+  // Only allow POST requests
+  if (req.method !== 'POST') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.status(405).json({ 
+      error: 'Method not allowed. Use POST.' 
+    });
+    return;
+  }
+
+  try {
+    console.log('🚀 YouTube Transcript Service called');
+    
+    // Parse request body
+    const { videoId, title, description } = req.body;
+    
+    // Validate required parameters
+    if (!videoId) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.status(400).json({ 
+        error: 'Missing required parameter: videoId' 
+      });
+      return;
+    }
+    
+    console.log(`🎬 Processing video: ${videoId}`);
+    console.log(`📝 Title: ${title || 'Unknown'}`);
+    
+    // Extract real transcript
+    const result = await extractRealTranscriptWithWhisper(
+      videoId, 
+      title || 'Unknown Video', 
+      description || ''
+    );
+    
+    console.log('✅ Transcript extraction completed successfully');
+    
+    // Return success response
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.status(200).json({
+      success: true,
+      data: result,
+      message: 'Real transcript extracted successfully'
+    });
+    
+  } catch (error) {
+    console.error('❌ Service error:', error.message);
+    
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      message: 'Transcript extraction failed'
+    });
     
     console.log(`🎉 SUCCESS: Real transcript extracted!`);
     console.log(`📝 Sample: ${whisperData.text.substring(0, 200)}...`);
