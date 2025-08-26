@@ -16,7 +16,8 @@ async function downloadRealYouTubeAudio(videoId) {
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
   
   try {
-    // Get video info with custom headers to avoid bot detection
+    // Method 1: Try with custom headers first
+    console.log(`🔄 Method 1: Trying with custom headers...`);
     const videoInfo = await ytdl.getInfo(videoUrl, {
       requestOptions: {
         headers: {
@@ -83,12 +84,75 @@ async function downloadRealYouTubeAudio(videoId) {
       });
       
       audioStream.on('error', (error) => {
+        console.log(`⚠️ Method 1 failed: ${error.message}`);
         reject(error);
       });
     });
     
   } catch (error) {
-    throw new Error(`Audio download failed: ${error.message}`);
+    console.log(`⚠️ Method 1 failed: ${error.message}`);
+    
+    // Method 2: Try with different user agent and simpler approach
+    try {
+      console.log(`🔄 Method 2: Trying with alternative approach...`);
+      const videoInfo = await ytdl.getInfo(videoUrl, {
+        requestOptions: {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+          }
+        }
+      });
+      
+      const audioFormats = ytdl.filterFormats(videoInfo.formats, 'audioonly');
+      if (audioFormats.length === 0) {
+        throw new Error('No audio formats available in method 2');
+      }
+      
+      const bestAudioFormat = audioFormats[0]; // Use first available format
+      
+      return new Promise((resolve, reject) => {
+        const audioStream = ytdl(videoUrl, {
+          format: bestAudioFormat,
+          requestOptions: {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Accept': '*/*',
+              'Accept-Language': 'en-US,en;q=0.9',
+              'Accept-Encoding': 'gzip, deflate, br',
+              'Connection': 'keep-alive',
+            }
+          }
+        });
+        
+        const chunks = [];
+        let totalBytes = 0;
+        
+        audioStream.on('data', (chunk) => {
+          chunks.push(chunk);
+          totalBytes += chunk.length;
+        });
+        
+        audioStream.on('end', () => {
+          console.log(`✅ Method 2 successful: ${(totalBytes / 1024 / 1024).toFixed(2)} MB`);
+          const buffer = Buffer.concat(chunks);
+          const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+          resolve(arrayBuffer);
+        });
+        
+        audioStream.on('error', (error) => {
+          console.log(`❌ Method 2 failed: ${error.message}`);
+          reject(error);
+        });
+      });
+      
+    } catch (method2Error) {
+      console.log(`❌ Method 2 failed: ${method2Error.message}`);
+      throw new Error(`All download methods failed. Last error: ${method2Error.message}`);
+    }
   }
 }
 
